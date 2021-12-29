@@ -1,0 +1,10 @@
+structures
+structures.tar.gz
+__pycache__
+LOG*
+exposed.xyz
+conf.prm
+stderror.txt
+triangleAreas.txt
+triangulatedSurf.face
+triangulatedSurf.vert
