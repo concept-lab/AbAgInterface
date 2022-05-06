@@ -1,4 +1,4 @@
-structures
+structures/
 structures.tar.gz
 __pycache__
 LOG*
@@ -8,3 +8,5 @@ stderror.txt
 triangleAreas.txt
 triangulatedSurf.face
 triangulatedSurf.vert
+old.ipynb
+plots_old
