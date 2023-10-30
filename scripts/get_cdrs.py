@@ -1,7 +1,7 @@
 import pandas as pd
 from Bio.Data.IUPACData import protein_letters_3to1 as AA_CONVERTER
 from abnumber import Chain
-from utils import read_pdb_line, get_sabdab_details, remove_redundant
+from utils import read_pdb_line, get_sabdab_details
 import numpy as np
 from scipy.spatial import distance_matrix
 from multiprocessing import Pool
@@ -12,13 +12,10 @@ class Structure:
         self.idcode = idcode
         self.pdb_path = f"../structures/raw/{idcode}.pdb"
 
-        self.chains = []
-        for i, values in df_pdb.iterrows():
-            chains = list(values[["Hchain", "Lchain"]].dropna().unique())
-            if len(chains) == 2:
-                self.chains += chains
-
-        self.antigen_chains = df_pdb.antigen_chain.values[0].replace(" | ", "")
+        self.chains = list(df_pdb.Hchain.dropna().unique()) + list(
+            df_pdb.Lchain.dropna().unique()
+        )
+        self.antigen_chains = list(df_pdb.antigen_chain.unique())
 
         self.get_sequence()
         self.ab_chains = {}
@@ -30,9 +27,9 @@ class Structure:
         with open(self.pdb_path) as f:
             for line in f:
                 if line.startswith("ATOM"):
-                    chain, res, *_ = read_pdb_line(line)
+                    chain, cdr_id, res, *_ = read_pdb_line(line)
                     (resname, resnumb) = res
-                    new = resname, chain, resnumb
+                    new = resname, chain, resnumb, cdr_id
                     if chain in self.chains and last != new:
                         res = AA_CONVERTER[resname.capitalize()]
                         self.sequence[chain] += res
@@ -41,40 +38,27 @@ class Structure:
 
     def get_cdrs(self, scheme):
         cdrs = {}
-        for ichain in range(0, len(self.chains), 2):
-            hchain, lchain = self.chains[ichain : ichain + 2]
-            chains = {}
-            for chainid in (hchain, lchain):
-                seq = self.sequence[chainid]
-                print(chainid, seq, scheme)
-                try:
-                    chain = Chain(seq, scheme=scheme)
-                    chains[chainid] = chain
-                except:
-                    continue
-
-            if len(chains) != 2:
+        for chainid, seq in self.sequence.items():
+            try:
+                chain = Chain(seq, scheme=scheme)
+            except:
                 continue
+            ab_chain = AbChain(seq, chainid, chain.chain_type)
+            self.ab_chains[chainid] = ab_chain
 
-            for chainid in (hchain, lchain):
-                seq = self.sequence[chainid]
-                chain = chains[chainid]
-                ab_chain = AbChain(seq, chainid, chain.chain_type)
-                self.ab_chains[chainid] = ab_chain
+            cdrs[chainid] = {
+                1: chain.cdr1_seq,
+                2: chain.cdr2_seq,
+                3: chain.cdr3_seq,
+            }
+            for i, cdr in cdrs[chainid].items():
+                b = seq.index(cdr)
+                e = b + len(cdr) - 1
 
-                cdrs[chainid] = {
-                    1: chain.cdr1_seq,
-                    2: chain.cdr2_seq,
-                    3: chain.cdr3_seq,
-                }
-                for i, cdr in cdrs[chainid].items():
-                    b = seq.index(cdr)
-                    e = b + len(cdr) - 1
+                b_resnumb = self.seqnumbs[chainid][b]
+                e_resnumb = self.seqnumbs[chainid][e]
 
-                    b_resnumb = self.seqnumbs[chainid][b]
-                    e_resnumb = self.seqnumbs[chainid][e]
-
-                    ab_chain.add_cdr(i, cdr, b_resnumb, e_resnumb)
+                ab_chain.add_cdr(i, cdr, b_resnumb, e_resnumb)
 
     def get_cdr_epitope(self, cutoff):
         if not self.ab_chains:
@@ -83,11 +67,12 @@ class Structure:
         cur_cdr = None
         cdr_i = None
         prev_resnumb = None
+        prev_insertion_code = None
         # Assign atoms to CDRs
         with open(self.pdb_path) as f:
             for line in f:
                 if line.startswith("ATOM"):
-                    chain, res, atom, coords = read_pdb_line(line)
+                    chain, insertion_code, res, atom, coords = read_pdb_line(line)
                     if chain in self.ab_chains:
                         (resname, resnumb) = res
 
@@ -104,22 +89,28 @@ class Structure:
                         if cur_cdr:
                             cdr = abchain.cdrs[cur_cdr]
 
-                            if prev_resnumb != resnumb:
+                            if (
+                                prev_resnumb != resnumb
+                                or insertion_code != prev_insertion_code
+                            ):
                                 cdr_i += 1
 
-                            if resnumb > cdr.i_end or cdr_i >= len(cdr.seq):
+                            if resnumb > cdr.i_end:
                                 # print("Reset")
                                 prev_resnumb = None
+                                prev_insertion_code = None
                                 cur_cdr = None
                             else:
                                 # print(
-                                #     resnumb,
-                                #     cdr.i_begin,
-                                #     cdr.i_end,
-                                #     resname,
-                                #     AA_CONVERTER[resname.capitalize()],
-                                #     cdr.seq[cdr_i],
-                                #     cdr_i,
+                                #    resnumb,
+                                #    cdr.i_begin,
+                                #    cdr.i_end,
+                                #    resname,
+                                #    cdr.seq[cdr_i],
+                                #    cdr_i,
+                                #    insertion_code,
+                                #    prev_insertion_code,
+                                #    insertion_code != prev_insertion_code,
                                 # )
                                 assert (
                                     AA_CONVERTER[resname.capitalize()] == cdr.seq[cdr_i]
@@ -127,19 +118,19 @@ class Structure:
                                 cdr.add_atom(atom, res, coords)
 
                                 prev_resnumb = resnumb
+                                prev_insertion_code = insertion_code
 
         candidates_details = []
         candidates_coords = []
         with open(self.pdb_path) as f:
             for line in f:
                 if line.startswith("ATOM"):
-                    chain, res, atom, coords = read_pdb_line(line)
+                    chain, _, res, atom, coords = read_pdb_line(line)
                     if chain in self.antigen_chains:
                         (resname, resnumb) = res
 
                         candidates_details.append((chain, res, atom))
                         candidates_coords.append(coords)
-
         if len(candidates_coords) == 0:
             return
 
@@ -179,6 +170,7 @@ class Structure:
         cdrs = []
         for chain in self.ab_chains.values():
             for i, cdr in chain.iter_cdrs():
+                # if cdr.epitope:
                 cdrs.append(
                     [
                         self.idcode,
@@ -252,16 +244,15 @@ def run(x):
     print(i, len(unique_pdbs), pdb)
     df_pdb = df_details.query(f'pdb == "{pdb}"')[["Hchain", "Lchain", "antigen_chain"]]
 
-    # try:
-    struct = Structure(pdb, df_pdb)
-    struct.get_cdrs(scheme)
-    struct.print_cdrs()
-    struct.get_cdr_epitope(cutoff)
-    cdrs = struct.save_cdr_epitopes()
-
-    # except:
-    #     cdrs = None
-    #     print("failed ->", pdb)
+    try:
+        struct = Structure(pdb, df_pdb)
+        struct.get_cdrs(scheme)
+        struct.print_cdrs()
+        struct.get_cdr_epitope(cutoff)
+        cdrs = struct.save_cdr_epitopes()
+    except:
+        cdrs = None
+        print("failed ->", pdb)
 
     if cdrs:
         df = pd.DataFrame(
@@ -279,8 +270,7 @@ def run(x):
                 "epitope_residues",
             ),
         )
-        df, removed = remove_redundant(df)
-        return df, removed
+        return df
     else:
         print("skipped")
 
@@ -304,43 +294,18 @@ if __name__ == "__main__":
             "epitope_residues",
         ),
     )
-    df_removed = df.copy()
     unique_pdbs = df_details.pdb.unique()
 
-    # df_r = run((0, "1adq"))
-    # print(
-    #     df_r[0][
-    #         [
-    #             "idcode",
-    #             "chainID",
-    #             "chain_type",
-    #             "cdr",
-    #             "cdr_atoms",
-    #             "epitope_residues",
-    #         ]
-    #     ]
-    # )
+    # df = run((1, "3j5m"))
+    # print(df)
     # exit()
 
-    # for i, pdb in enumerate(unique_pdbs[675:]):
-    #     print(f"### {i} ###")
-    #     df_r = run((i, pdb))
-    #     print(df_r[["idcode", "chainID", "chain_type", "cdr", "epitope_residues"]])
-    #     exit()
-
-    with Pool(8) as p:
+    with Pool(48) as p:
         rs = p.map(run, [(i, pdb) for i, pdb in enumerate(unique_pdbs)])
 
     for r in rs:
-        if r[0] is not None:
-            df = df.append(r[0], ignore_index=True)
-        if r[1] is not None:
-            df_removed = df_removed.append(r[1], ignore_index=True)
+        if r is not None:
+            df = df.append(r, ignore_index=True)
 
-    print(f"PDBs: {len(df.idcode.unique())}\tCDRs: {len(df)}\tAbAg: {len(df)/6}")
+    print(len(df), len(df.idcode.unique()))
     df.to_pickle("../data/cdr_epitope.pickle")
-
-    print(
-        f"PDBs: {len(df_removed.idcode.unique())}\tCDRs: {len(df_removed)}\tAbAg: {len(df_removed)/6}"
-    )
-    df_removed.to_pickle("../data/cdr_epitope_redundant.pickle")
